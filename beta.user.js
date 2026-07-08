@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Bilibili 免登入 1080P & 1080P 60
 // @namespace    http://tampermonkey.net/
-// @version      4.6
-// @description  免登入解鎖 B站 1080P 畫質限制，自動移除所有登入彈窗，解鎖留言區查看限制，並提供多條網頁內嵌解析線路
+// @version      4.9
+// @description  免登入解鎖 B 站 1080P 畫質限制，自動移除所有登入彈窗，解鎖留言區查看限制，並提供多條網頁內嵌解析線路
 // @author       Hh
 // @match        *://*.bilibili.com/video/*
 // @match        *://*.bilibili.com/list/*
@@ -17,14 +17,20 @@
 (function() {
     'use strict';
 
-    // ========== 新增：自動播放相關配置 ==========
-    const AUTO_PLAY_ENABLED = true;  // 是否啟用自動播放功能
-    const AUTO_PLAY_DELAY = 500;     // 自動播放延遲時間(毫秒)，用於等待DOM準備就緒
+    // ========== 配置 ==========
+    const AUTO_PLAY_ENABLED = true;
+    const AUTO_PLAY_DELAY = 500;
+    const MINIMIZED_SIZE = 44;  // 縮小後的按鈕尺寸 (px)
 
-    // 1. 注入全局變量，直接在網頁 JS 運行前偽裝登入狀態，欺騙 B 站前端組件
+    // ========== 拖曳狀態 ==========
+    let isDragging = false;
+    let startPos = { x: 0, y: 0 };
+    let initialPos = { x: 0, y: 0 };
+    let dragStartTime = 0;
+
+    // 1. 注入全局變量
     try {
         Object.defineProperty(window, 'isLogin', { get: () => true, configurable: true });
-
         const fakeUser = {
             isLogin: true,
             mid: 99999999,
@@ -32,14 +38,13 @@
             face: "https://static.hdslb.com/images/akari.jpg",
             level_info: { current_level: 4 }
         };
-
         Object.defineProperty(window, 'BiliUser', { get: () => fakeUser, configurable: true });
         Object.defineProperty(window, '__BILI_USER_INFO__', { get: () => fakeUser, configurable: true });
     } catch (e) {
         console.error("Failed to inject global bypass variables:", e);
     }
 
-    // 2. 網絡請求劫持：針對 /x/web-interface/nav 回傳已登入的虛擬用戶信息，解鎖留言區和展開限制
+    // 2. 網絡請求劫持
     function interceptLoginStatus() {
         const mockNavResponse = {
             code: 0,
@@ -49,12 +54,7 @@
                 isLogin: true,
                 email_verified: 1,
                 face: "https://static.hdslb.com/images/akari.jpg",
-                level_info: {
-                    current_level: 4,
-                    current_min: 0,
-                    current_exp: 0,
-                    next_exp: 0
-                },
+                level_info: { current_level: 4, current_min: 0, current_exp: 0, next_exp: 0 },
                 mid: 99999999,
                 mobile_verified: 1,
                 money: 100,
@@ -70,7 +70,6 @@
             }
         };
 
-        // 劫持 XMLHttpRequest
         const rawOpen = XMLHttpRequest.prototype.open;
         XMLHttpRequest.prototype.open = function(method, url) {
             this._url = url;
@@ -84,22 +83,15 @@
                 Object.defineProperty(this, 'readyState', { writable: true, value: 4 });
                 Object.defineProperty(this, 'responseText', { writable: true, value: JSON.stringify(mockNavResponse) });
                 Object.defineProperty(this, 'response', { writable: true, value: JSON.stringify(mockNavResponse) });
-
-                // 異步觸發事件，確保網頁上的監聽器能正常接收到偽裝數據
                 setTimeout(() => {
-                    if (typeof this.onreadystatechange === 'function') {
-                        this.onreadystatechange();
-                    }
-                    if (typeof this.onload === 'function') {
-                        this.onload();
-                    }
+                    if (typeof this.onreadystatechange === 'function') this.onreadystatechange();
+                    if (typeof this.onload === 'function') this.onload();
                 }, 0);
                 return;
             }
             return rawSend.apply(this, arguments);
         };
 
-        // 劫持 fetch API
         const rawFetch = window.fetch;
         window.fetch = async function(...args) {
             const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
@@ -114,24 +106,15 @@
         };
     }
 
-    // 啟動 API 劫持
     interceptLoginStatus();
 
-    // 3. 全方位 CSS 注入：隱藏所有登入提示、並恢復留言區自由滾動、點擊和選取
+    // 3. CSS 注入（優化拖曳和縮小時的狀態）
     const css = `
         /* 隱藏登入與限制彈窗 */
-        .bili-mini-mask,
-        .bili-mini-login-wrapper,
-        .bili-dialog-m,
-        .login-tip,
-        .v-popover-content.login-tip,
-        .bili-guide,
-        .login-panel,
-        div[class*="login-tips"],
-        div[class*="login-guide"],
-        .unlogin-popover,
-        .conments-login-mask,
-        .comment-send-privilege,
+        .bili-mini-mask, .bili-mini-login-wrapper, .bili-dialog-m, .login-tip,
+        .v-popover-content.login-tip, .bili-guide, .login-panel,
+        div[class*="login-tips"], div[class*="login-guide"],
+        .unlogin-popover, .conments-login-mask, .comment-send-privilege,
         .reply-box-send .unlogin-box {
             display: none !important;
             visibility: hidden !important;
@@ -139,20 +122,18 @@
             pointer-events: none !important;
         }
 
-        /* 恢復留言區與頁面被鎖死、無法滾動的問題 */
         body, html {
             overflow: auto !important;
             position: relative !important;
         }
 
-        /* 解鎖被模糊或無法點擊的留言區、確保可以選取內容 */
         .reply-box, .comment-container, .bb-comment, .comment-list, .reply-list {
             filter: none !important;
             pointer-events: auto !important;
             user-select: text !important;
         }
 
-        /* 懸浮控制面板樣式 */
+        /* 控制面板主體 */
         #bili-bypass-panel {
             position: fixed;
             bottom: 80px;
@@ -167,21 +148,16 @@
             color: #ffffff;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
-            transition: all 0.3s ease;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, opacity 0.2s ease;
             width: 250px;
+            will-change: transform;
         }
 
-        #bili-bypass-panel.minimized {
-            width: 44px;
-            height: 44px;
-            padding: 0;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            background: #00aeec;
-            border: 2px solid #ffffff;
+        #bili-bypass-panel.dragging {
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8);
+            cursor: grabbing;
+            opacity: 0.95;
+            transition: none;
         }
 
         #bili-bypass-panel h3 {
@@ -192,12 +168,22 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            cursor: grab;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        #bili-bypass-panel h3:active {
+            cursor: grabbing;
         }
 
         #bili-bypass-panel .close-btn {
             cursor: pointer;
-            font-size: 14px;
+            font-size: 18px;
             color: #aaa;
+            line-height: 1;
+            padding: 0 4px;
+            transition: color 0.2s;
         }
 
         #bili-bypass-panel .close-btn:hover {
@@ -206,20 +192,26 @@
 
         .bypass-select {
             width: 100%;
-            padding: 6px;
+            padding: 8px;
             background: #333;
             color: #fff;
             border: 1px solid #00aeec;
             border-radius: 6px;
             font-size: 12px;
             margin-bottom: 10px;
+            outline: none;
+        }
+
+        .bypass-select:focus {
+            border-color: #00d4ff;
+            box-shadow: 0 0 8px rgba(0, 212, 255, 0.4);
         }
 
         .bypass-btn {
             display: block;
             width: 100%;
             padding: 10px;
-            background: #00aeec;
+            background: linear-gradient(135deg, #00aeec 0%, #0095cc 100%);
             border: none;
             border-radius: 6px;
             color: white;
@@ -228,23 +220,29 @@
             cursor: pointer;
             text-align: center;
             margin-top: 8px;
-            transition: all 0.2s;
+            transition: all 0.2s ease;
         }
 
         .bypass-btn:hover {
-            background: #008cc0;
-            transform: translateY(-1px);
+            background: linear-gradient(135deg, #00c4fc 0%, #00a8e8 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 174, 236, 0.4);
+        }
+
+        .bypass-btn:active {
+            transform: translateY(0);
         }
 
         .bypass-btn.secondary {
-            background: #444;
+            background: linear-gradient(135deg, #4a4a4a 0%, #333 100%);
             border: 1px solid #555;
         }
+
         .bypass-btn.secondary:hover {
-            background: #555;
+            background: linear-gradient(135deg, #5a5a5a 0%, #444 100%);
+            box-shadow: 0 4px 12px rgba(100, 100, 100, 0.4);
         }
 
-        /* 絕對定位的內嵌播放器容器，確保 16:9 且完美覆蓋 */
         .bili-bypass-iframe-overlay {
             position: absolute !important;
             top: 0 !important;
@@ -257,7 +255,60 @@
             overflow: hidden !important;
         }
 
-        /* 新增：自動播放成功提示 */
+        /* ========== 優化後的縮小球形按鈕 ========== */
+        #bili-bypass-panel.minimized {
+            width: ${MINIMIZED_SIZE}px !important;
+            height: ${MINIMIZED_SIZE}px !important;
+            padding: 0 !important;
+            border-radius: 50% !important;
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            cursor: grab !important;
+            background: linear-gradient(135deg, #00aeec 0%, #0095cc 100%) !important;
+            border: 2px solid #ffffff !important;
+            box-shadow: 0 6px 25px rgba(0, 174, 236, 0.5) !important;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+            will-change: transform;
+        }
+
+        #bili-bypass-panel.minimized:hover {
+            transform: scale(1.15);
+            box-shadow: 0 10px 35px rgba(0, 174, 236, 0.7) !important;
+        }
+
+        #bili-bypass-panel.minimized.dragging {
+            cursor: grabbing !important;
+            transform: scale(1.05) !important;
+            transition: none !important;
+        }
+
+        #bili-bypass-panel.minimized #panel-minimized {
+            display: flex !important;
+            align-items: center !important;
+            justify-content: center !important;
+            width: 100% !important;
+            height: 100% !important;
+            font-size: 22px !important;
+            font-weight: bold !important;
+            color: #ffffff !important;
+            line-height: 1 !important;
+            user-select: none !important;
+            pointer-events: none !important;
+        }
+
+        #bili-bypass-panel.minimized #panel-maximized {
+            display: none !important;
+        }
+
+        #bili-bypass-panel:not(.minimized) #panel-maximized {
+            display: block !important;
+        }
+
+        #bili-bypass-panel:not(.minimized) #panel-minimized {
+            display: none !important;
+        }
+
         .auto-play-toast {
             position: fixed;
             top: 20px;
@@ -265,11 +316,12 @@
             transform: translateX(-50%);
             background: rgba(0, 174, 236, 0.9);
             color: white;
-            padding: 10px 20px;
+            padding: 12px 24px;
             border-radius: 8px;
             z-index: 100000;
             font-size: 14px;
             animation: fadeInOut 3s forwards;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
         }
 
         @keyframes fadeInOut {
@@ -281,16 +333,13 @@
     `;
     GM_addStyle(css);
 
-    // 4. 實時監聽器：阻斷登入彈窗，並自動恢復被鎖定的留言區
+    // 4. 實時監聽器
     function startObserver() {
         const observer = new MutationObserver(() => {
-            // 移除可能阻擋畫面的各種遮罩與彈窗
             const loginDialogs = document.querySelectorAll('.bili-mini-mask, .bili-mini-login-wrapper, .bili-dialog-m, [class*="login-tips"]');
             if (loginDialogs.length > 0) {
                 loginDialogs.forEach(dialog => dialog.remove());
             }
-
-            // 確保被限制的留言區可以點擊和看見
             const commentSections = document.querySelectorAll('.reply-box, .comment-container, .bb-comment, .comment-list');
             commentSections.forEach(section => {
                 if (section.style.pointerEvents === 'none' || section.style.filter.includes('blur')) {
@@ -302,14 +351,14 @@
         observer.observe(document.documentElement, { childList: true, subtree: true });
     }
 
-    // 5. 核心：在不破壞 DOM 結構的前提下，完美疊加 1080P 播放器，保證網頁 React 元件不崩潰、留言區照常顯示
+    // 5. 核心：播放器替換
     function replacePlayer(engineUrl) {
         const currentUrl = window.location.href;
         const targetIframeSrc = `${engineUrl}${encodeURIComponent(currentUrl)}`;
 
         const playerSelectors = [
-            '.bpx-player-video-area',           // 新版 HTML5 播放器核心區
-            '#bilibili-player',                 // 舊版或備用
+            '.bpx-player-video-area',
+            '#bilibili-player',
             '#player_module',
             '.bilibili-player-video-wrap',
             '#player-container'
@@ -326,11 +375,9 @@
                 playerContainer.style.position = 'relative';
             }
 
-            // 先移除之前可能已經加過的舊 iframe
             const oldOverlay = playerContainer.querySelector('.bili-bypass-iframe-overlay');
             if (oldOverlay) oldOverlay.remove();
 
-            // 建立無縫覆蓋的播放容器
             const overlayDiv = document.createElement('div');
             overlayDiv.className = 'bili-bypass-iframe-overlay';
 
@@ -341,20 +388,19 @@
             iframe.style.border = 'none';
             iframe.allowFullscreen = true;
             iframe.setAttribute('allow', 'fullscreen');
+            iframe.setAttribute('crossorigin', 'anonymous');
 
             overlayDiv.appendChild(iframe);
             playerContainer.appendChild(overlayDiv);
 
-            console.log('[Bilibili Helper] Successfully overlayed player with 1080P engine.');
-
-            // 靜音並暫停 B 站原生的背景視訊
+            console.log('[Bilibili Helper] Player overlayed successfully.');
             silenceNativePlayer();
         } else {
             console.error('[Bilibili Helper] Player container not found.');
         }
     }
 
-    // 6. 輔助：靜音與暫停 B 站的原生影片播放，避免背景音效干擾 1080P 的聲音
+    // 6. 靜音原生播放器
     function silenceNativePlayer() {
         setInterval(() => {
             const nativeVideos = document.querySelectorAll('video, bwp-video');
@@ -368,21 +414,99 @@
         }, 1000);
     }
 
-    // ========== 新增：自動播放功能 ==========
+    // ========== 優化後的拖曳功能 ==========
+    function setupPanelDraggable() {
+        const panel = document.getElementById('bili-bypass-panel');
+        if (!panel) return;
 
-    /**
-     * 檢查當前頁面是否為影片頁面
-     */
+        const onPointerDown = (e) => {
+            // 排除按鈕和選單區域
+            if (e.target.closest('.bypass-btn') || e.target.closest('select')) return;
+
+            isDragging = true;
+            dragStartTime = Date.now();
+            panel.classList.add('dragging');
+
+            startPos.x = e.clientX || e.touches?.[0]?.clientX || 0;
+            startPos.y = e.clientY || e.touches?.[0]?.clientY || 0;
+
+            const rect = panel.getBoundingClientRect();
+            initialPos.x = rect.left;
+            initialPos.y = rect.top;
+
+            // 使用 transform 提升性能
+            panel.style.transition = 'none';
+        };
+
+        const onPointerMove = (e) => {
+            if (!isDragging) return;
+
+            const clientX = e.clientX || e.touches?.[0]?.clientX || 0;
+            const clientY = e.clientY || e.touches?.[0]?.clientY || 0;
+
+            const deltaX = clientX - startPos.x;
+            const deltaY = clientY - startPos.y;
+
+            // 使用 requestAnimationFrame 優化性能
+            requestAnimationFrame(() => {
+                panel.style.transform = `translate(${deltaX}px, ${deltaY}px)`;
+            });
+        };
+
+        const onPointerUp = () => {
+            if (!isDragging) return;
+
+            const duration = Date.now() - dragStartTime;
+            isDragging = false;
+            panel.classList.remove('dragging');
+
+            // 如果拖曳時間很短，視為點擊而非拖曳
+            if (duration < 200) {
+                panel.style.transform = 'translate(0, 0)';
+
+                // 如果是縮小狀態，點擊後還原
+                if (panel.classList.contains('minimized')) {
+                    panel.classList.remove('minimized');
+                }
+                return;
+            }
+
+            // 應用最終位置
+            const rect = panel.getBoundingClientRect();
+            const newX = initialPos.x + (rect.left - initialPos.x);
+            const newY = initialPos.y + (rect.top - initialPos.y);
+
+            panel.style.transition = 'transform 0.2s ease';
+            panel.style.transform = `translate(${newX - (panel.offsetLeft || 0)}px, ${newY - (panel.offsetTop || 0)}px)`;
+
+            // 保存最終位置到 CSS
+            setTimeout(() => {
+                panel.style.transform = '';
+                panel.style.left = `${rect.left}px`;
+                panel.style.top = `${rect.top}px`;
+                panel.style.right = 'auto';
+                panel.style.bottom = 'auto';
+            }, 200);
+        };
+
+        // 綁定事件（同時支援滑鼠和觸控）
+        panel.addEventListener('mousedown', onPointerDown);
+        panel.addEventListener('touchstart', onPointerDown, { passive: false });
+
+        document.addEventListener('mousemove', onPointerMove);
+        document.addEventListener('touchmove', onPointerMove, { passive: false });
+
+        document.addEventListener('mouseup', onPointerUp);
+        document.addEventListener('touchend', onPointerUp);
+    }
+
+    // ========== 自動播放功能 ==========
     function isVideoPage() {
         const path = window.location.pathname;
         return path.includes('/video/') || path.includes('/bangumi/play/');
     }
 
-    /**
-     * 顯示自動播放提示
-     */
     function showAutoPlayToast(message) {
-        // 移除舊的 toast
         const existingToast = document.querySelector('.auto-play-toast');
         if (existingToast) existingToast.remove();
 
@@ -391,35 +515,20 @@
         toast.textContent = message;
         document.body.appendChild(toast);
 
-        // 3秒後自動移除
-        setTimeout(() => {
-            toast.remove();
-        }, 3000);
+        setTimeout(() => toast.remove(), 3000);
     }
 
-    /**
-     * 獲取預設線路
-     */
     function getDefaultEngineUrl() {
-        // 使用面板中選擇的第一個選項作為預設
         return 'https://jx.xmflv.com/?url=';
     }
 
-    /**
-     * 執行自動播放
-     */
     function autoTriggerPlayer() {
-        if (!AUTO_PLAY_ENABLED || !isVideoPage()) {
-            return;
-        }
+        if (!AUTO_PLAY_ENABLED || !isVideoPage()) return;
 
-        console.log('[Bilibili Helper] Auto-play triggered for:', window.location.href);
+        console.log('[Bilibili Helper] Auto-play triggered:', window.location.href);
 
-        // 延遲執行以確保DOM完全載入
         setTimeout(() => {
             const engineUrl = getDefaultEngineUrl();
-
-            // 等待播放器容器出現
             const checkInterval = setInterval(() => {
                 if (document.querySelector('.bpx-player-video-area') ||
                     document.querySelector('#bilibili-player') ||
@@ -431,32 +540,22 @@
                 }
             }, 100);
 
-            // 最長等待 5 秒
-            setTimeout(() => {
-                clearInterval(checkInterval);
-            }, 5000);
+            setTimeout(() => clearInterval(checkInterval), 5000);
         }, AUTO_PLAY_DELAY);
     }
 
-    /**
-     * URL 變化監控 - 處理 SPA 路由導航
-     */
     function setupURLMonitor() {
         let lastHref = window.location.href;
-
-        // 使用 MutationObserver 監控 URL 變化
         const observer = new MutationObserver(() => {
             const currentHref = window.location.href;
             if (currentHref !== lastHref) {
                 lastHref = currentHref;
-                console.log('[Bilibili Helper] URL changed to:', currentHref);
+                console.log('[Bilibili Helper] URL changed:', currentHref);
                 autoTriggerPlayer();
             }
         });
 
         observer.observe(document, { subtree: true, childList: true, attributes: true });
-
-        // 同時監聽 popstate 和 hashchange 事件
         window.addEventListener('popstate', autoTriggerPlayer);
         window.addEventListener('hashchange', autoTriggerPlayer);
     }
@@ -467,20 +566,20 @@
         panel.id = 'bili-bypass-panel';
         panel.innerHTML = `
             <div id="panel-maximized">
-                <h3>Bilibili 免登入工具 <span class="close-btn" id="panel-minimize-btn">-</span></h3>
+                <h3>Bilibili 免登入工具 <span class="close-btn" id="panel-minimize-btn">✕</span></h3>
                 <div style="font-size: 11px; color: #ccc; margin-bottom: 8px;">
                     請選擇解析線路：
                 </div>
                 <select id="bypass-line-select" class="bypass-select">
                     <option value="https://jx.xmflv.com/?url=">蝦米解析一線</option>
                     <option value="https://jx.xmflv.cc/?url=">蝦米解析二線</option>
-                    <option value="https://okjx.cc/?url=">OK解析線路</option>
+                    <option value="https://okjx.cc/?url=">OK 解析線路</option>
                     <option value="https://jx.aidouer.net/?url=">愛豆解析線路</option>
                 </select>
-                <button class="bypass-btn" id="btn-embed-play">網頁內嵌播放 (1080P/60幀)</button>
+                <button class="bypass-btn" id="btn-embed-play">網頁內嵌播放 (1080P/60 幀)</button>
                 <button class="bypass-btn secondary" id="btn-new-tab-play">新分頁獨立播放</button>
             </div>
-            <div id="panel-minimized" style="display: none; font-size: 12px; font-weight: bold; text-align: center; width: 100%; line-height: 44px; color: #ffffff;">助手</div>
+            <div id="panel-minimized">☭</div>
         `;
         document.body.appendChild(panel);
 
@@ -489,43 +588,73 @@
         const minBtn = panel.querySelector('#panel-minimize-btn');
         const lineSelect = panel.querySelector('#bypass-line-select');
 
-        // 最小化與還原
+        // 最小化按鈕
         minBtn.addEventListener('click', (e) => {
             e.stopPropagation();
             panel.classList.add('minimized');
-            maxView.style.display = 'none';
-            minView.style.display = 'flex';
         });
 
-        panel.addEventListener('click', () => {
+        // 縮小球形按鈕點擊事件 - 直接還原面板
+        minView.addEventListener('click', (e) => {
+            e.stopPropagation();
             if (panel.classList.contains('minimized')) {
                 panel.classList.remove('minimized');
-                maxView.style.display = 'block';
-                minView.style.display = 'none';
             }
         });
 
-        // 點擊事件 1：疊加播放器（無損嵌入）
-        panel.querySelector('#btn-embed-play').addEventListener('click', () => {
+        // 防止拖曳誤觸發點擊
+        panel.addEventListener('mousedown', () => {
+            dragStartTime = Date.now();
+        });
+
+        panel.addEventListener('mouseup', (e) => {
+            const duration = Date.now() - dragStartTime;
+            // 只有短時間內松开且沒有拖曳動作才視為點擊
+            if (duration < 200 && !isDragging) {
+                // 如果不是在按鈕區域內
+                if (!e.target.closest('.bypass-btn') && !e.target.closest('select')) {
+                    // 在縮小狀態下點擊空白區域也可以還原
+                    if (panel.classList.contains('minimized')) {
+                        // 只在點擊的是 minView 時才還原
+                        if (e.target === minView || minView.contains(e.target)) {
+                            panel.classList.remove('minimized');
+                        }
+                    }
+                }
+            }
+        });
+
+        // 最大化面板的點擊區域處理
+        panel.addEventListener('click', (e) => {
+            if (panel.classList.contains('minimized') && !e.target.closest('.bypass-btn') && !e.target.closest('select')) {
+                if (e.target === minView || e.target === panel) {
+                    panel.classList.remove('minimized');
+                }
+            }
+        });
+
+        // 按鈕事件
+        panel.querySelector('#btn-embed-play').addEventListener('click', (e) => {
+            e.stopPropagation();
             const selectedEngine = lineSelect.value;
             replacePlayer(selectedEngine);
             showAutoPlayToast('手動觸發 1080P 內嵌播放');
         });
 
-        // 點擊事件 2：新分頁開啟
-        panel.querySelector('#btn-new-tab-play').addEventListener('click', () => {
+        panel.querySelector('#btn-new-tab-play').addEventListener('click', (e) => {
+            e.stopPropagation();
             const selectedEngine = lineSelect.value;
-            const currentUrl = window.location.href;
-            window.open(`${selectedEngine}${encodeURIComponent(currentUrl)}`, '_blank');
+            window.open(`${selectedEngine}${encodeURIComponent(window.location.href)}`, '_blank');
         });
     }
 
-    // 8. 網頁加載完畢後初始化
+    // 8. 初始化
     window.addEventListener('DOMContentLoaded', () => {
         createControlPanel();
         startObserver();
-        setupURLMonitor();  // 新增：設置 URL 監控
-        autoTriggerPlayer(); // 新增：初次進入時檢查是否需要自動播放
+        setupURLMonitor();
+        autoTriggerPlayer();
+        setupPanelDraggable();
     });
 
 })();
